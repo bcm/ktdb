@@ -33,3 +33,7 @@ application {
     // Define the main class for the application.
     mainClassName = "ktdb.AppKt"
 }
+
+val run by tasks.getting(JavaExec::class) {
+    standardInput = System.`in`
+}
