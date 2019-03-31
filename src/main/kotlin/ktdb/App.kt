@@ -2,13 +2,75 @@ package ktdb
 
 import kotlin.system.exitProcess
 
+class SyntaxError(input: String) : Exception("Syntax error. Could not parse statement.")
+class TableFull() : Exception("Error: Table full.")
 class UnrecognizedCommand(input: String) : Exception("Unrecognized command '$input'")
 class UnrecognizedStatement(input: String) : Exception("Unrecognized keyword at start of '$input'")
 
-enum class StatementType {
-    INSERT, SELECT
+class Row(val id: Int, val username: String, val email: String) {
+    companion object {
+        val SIZE = 291
+    }
 }
-class Statement(val type: StatementType)
+
+class Table() {
+    val pages = mutableListOf<Page>()
+
+    fun addRow(row: Row) {
+        if (pages.isEmpty()) {
+            val firstPage = Page()
+            firstPage.addRow(row)
+            pages.add(firstPage)
+        } else {
+            val lastPage = pages.last()
+            if (lastPage.isFull()) {
+                val nextPage = Page()
+                nextPage.addRow(row)
+                pages.add(nextPage)
+            } else {
+                lastPage.addRow(row)
+            }
+        }
+    }
+
+    fun eachRow(callback: (row: Row) -> Unit) {
+        for (page in pages) {
+            for (row in page.rows) {
+                callback(row)
+            }
+        }
+    }
+
+    fun isFull() = pages.size >= Table.MAX_PAGES
+
+    companion object {
+        val MAX_PAGES = 100
+    }
+}
+
+class Page() {
+    val rows = mutableListOf<Row>()
+
+    fun addRow(row: Row) = rows.add(row)
+
+    fun isFull() = rows.size >= Page.MAX_ROWS
+
+    companion object {
+        val SIZE = 4096
+        val MAX_ROWS = SIZE / Row.SIZE
+    }
+}
+
+sealed class Statement
+class InsertStatement(val row: Row) : Statement()
+class SelectStatement : Statement()
+
+val INSERT_REGEX = """^insert (\d+) (\S+) (\S+)""".toRegex(RegexOption.IGNORE_CASE)
+val SELECT_REGEX = """^select.*""".toRegex(RegexOption.IGNORE_CASE)
+
+fun printRow(row: Row) {
+    println("(${row.id}, ${row.username}, ${row.email})")
+}
 
 fun printPrompt() {
     print("db > ")
@@ -21,25 +83,46 @@ fun doMetaCommand(input: String) {
     }
 }
 
-val INSERT_REGEX = "^insert.*".toRegex(RegexOption.IGNORE_CASE)
-val SELECT_REGEX = "^select.*".toRegex(RegexOption.IGNORE_CASE)
-
 fun prepareStatement(input: String): Statement {
-    when {
-        INSERT_REGEX.matches(input) -> return Statement(StatementType.INSERT)
-        SELECT_REGEX.matches(input) -> return Statement(StatementType.SELECT)
-        else -> throw UnrecognizedStatement(input)
+    val lowerInput = input.toLowerCase()
+
+    if (lowerInput.startsWith("insert")) {
+        val result = INSERT_REGEX.find(input)
+        if (result == null) throw SyntaxError(input)
+        val (id, username, email) = result.destructured
+        val row = Row(id.toInt(), username, email)
+        return InsertStatement(row)
     }
+
+    if (lowerInput.startsWith("select")) {
+        val result = SELECT_REGEX.find(input)
+        if (result == null) throw SyntaxError(input)
+        return SelectStatement()
+    }
+
+    throw UnrecognizedStatement(input)
 }
 
-fun executeStatement(statement: Statement) {
-    when (statement.type) {
-        StatementType.INSERT -> println("This is where we would do an insert.")
-        StatementType.SELECT -> println("This is where we would do a select.")
+fun executeInsert(table: Table, statement: InsertStatement) {
+    if (table.isFull()) throw TableFull()
+
+    table.addRow(statement.row)
+}
+
+fun executeSelect(table: Table, statement: SelectStatement) {
+    table.eachRow({ row -> printRow(row) })
+}
+
+fun executeStatement(table: Table, statement: Statement) {
+    when (statement) {
+        is InsertStatement -> executeInsert(table, statement)
+        is SelectStatement -> executeSelect(table, statement)
     }
 }
 
 fun main(args: Array<String>) {
+    val table = Table()
+
     do {
         printPrompt()
         val input = readLine() ?: ".exit"
@@ -56,9 +139,9 @@ fun main(args: Array<String>) {
 
         try {
             val statement = prepareStatement(input)
-            executeStatement(statement)
+            executeStatement(table, statement)
             println("Executed.")
-        } catch (e: UnrecognizedStatement) {
+        } catch (e: Exception) {
             println(e.message)
         } finally {
             continue
