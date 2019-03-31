@@ -2,6 +2,8 @@ package ktdb
 
 import kotlin.system.exitProcess
 
+class NegativeID() : Exception("ID must be positive.")
+class StringTooLong() : Exception("String is too long.")
 class SyntaxError(input: String) : Exception("Syntax error. Could not parse statement.")
 class TableFull() : Exception("Error: Table full.")
 class UnrecognizedCommand(input: String) : Exception("Unrecognized command '$input'")
@@ -41,7 +43,7 @@ class Table() {
         }
     }
 
-    fun isFull() = pages.size >= Table.MAX_PAGES
+    fun isFull() = pages.size >= Table.MAX_PAGES && pages.last().isFull()
 
     companion object {
         val MAX_PAGES = 100
@@ -65,8 +67,10 @@ sealed class Statement
 class InsertStatement(val row: Row) : Statement()
 class SelectStatement : Statement()
 
-val INSERT_REGEX = """^insert (\d+) (\S+) (\S+)""".toRegex(RegexOption.IGNORE_CASE)
+val INSERT_REGEX = """^insert ([-\d]+) (\S+) (\S+)""".toRegex(RegexOption.IGNORE_CASE)
 val SELECT_REGEX = """^select.*""".toRegex(RegexOption.IGNORE_CASE)
+val COLUMN_USERNAME_SIZE = 32
+val COLUMN_EMAIL_SIZE = 255
 
 fun printRow(row: Row) {
     println("(${row.id}, ${row.username}, ${row.email})")
@@ -83,22 +87,33 @@ fun doMetaCommand(input: String) {
     }
 }
 
+fun prepareInsert(input: String): InsertStatement {
+    val result = INSERT_REGEX.find(input)
+    if (result == null) throw SyntaxError(input)
+
+    val (idStr, username, email) = result.destructured
+    val id = idStr.toInt()
+
+    if (id < 0) throw NegativeID()
+    if (username.length > COLUMN_USERNAME_SIZE) throw StringTooLong()
+    if (email.length > COLUMN_EMAIL_SIZE) throw StringTooLong()
+
+    val row = Row(id, username, email)
+    return InsertStatement(row)
+}
+
+fun prepareSelect(input: String): SelectStatement {
+    val result = SELECT_REGEX.find(input)
+    if (result == null) throw SyntaxError(input)
+
+    return SelectStatement()
+}
+
 fun prepareStatement(input: String): Statement {
     val lowerInput = input.toLowerCase()
 
-    if (lowerInput.startsWith("insert")) {
-        val result = INSERT_REGEX.find(input)
-        if (result == null) throw SyntaxError(input)
-        val (id, username, email) = result.destructured
-        val row = Row(id.toInt(), username, email)
-        return InsertStatement(row)
-    }
-
-    if (lowerInput.startsWith("select")) {
-        val result = SELECT_REGEX.find(input)
-        if (result == null) throw SyntaxError(input)
-        return SelectStatement()
-    }
+    if (lowerInput.startsWith("insert")) return prepareInsert(input)
+    if (lowerInput.startsWith("select")) return prepareSelect(input)
 
     throw UnrecognizedStatement(input)
 }
