@@ -1,7 +1,15 @@
 package ktdb
 
+import java.nio.ByteBuffer
+import java.nio.channels.SeekableByteChannel
+import java.nio.charset.Charset
+import java.nio.file.Files
+import java.nio.file.FileSystems
+import java.nio.file.Path
+import java.nio.file.StandardOpenOption
 import kotlin.system.exitProcess
 
+class FileCorruptionError() : Exception("Database file is corrupted.")
 class NegativeID() : Exception("ID must be positive.")
 class StringTooLong() : Exception("String is too long.")
 class SyntaxError(input: String) : Exception("Syntax error. Could not parse statement.")
@@ -9,44 +17,41 @@ class TableFull() : Exception("Error: Table full.")
 class UnrecognizedCommand(input: String) : Exception("Unrecognized command '$input'")
 class UnrecognizedStatement(input: String) : Exception("Unrecognized keyword at start of '$input'")
 
-class Row(val id: Int, val username: String, val email: String) {
-    companion object {
-        val SIZE = 291
+val DESER_REGEX = """^(-\d]+):(\d+):(\d+):(.+)$""".toRegex(RegexOption.IGNORE_CASE)
+val UTF_8 = Charset.forName("UTF-8")
+
+data class Row(val id: Int, val username: String, val email: String) {
+    fun serialize(buf: ByteBuffer) {
+        buf.putInt(id)
+
+        val ubytes = username.toByteArray(UTF_8)
+        buf.putInt(ubytes.size)
+        buf.put(ubytes)
+
+        val ebytes = email.toByteArray(UTF_8)
+        buf.putInt(ebytes.size)
+        buf.put(ebytes)
     }
-}
-
-class Table() {
-    val pages = mutableListOf<Page>()
-
-    fun addRow(row: Row) {
-        if (pages.isEmpty()) {
-            val firstPage = Page()
-            firstPage.addRow(row)
-            pages.add(firstPage)
-        } else {
-            val lastPage = pages.last()
-            if (lastPage.isFull()) {
-                val nextPage = Page()
-                nextPage.addRow(row)
-                pages.add(nextPage)
-            } else {
-                lastPage.addRow(row)
-            }
-        }
-    }
-
-    fun eachRow(callback: (row: Row) -> Unit) {
-        for (page in pages) {
-            for (row in page.rows) {
-                callback(row)
-            }
-        }
-    }
-
-    fun isFull() = pages.size >= Table.MAX_PAGES && pages.last().isFull()
 
     companion object {
-        val MAX_PAGES = 100
+        val COLUMN_USERNAME_SIZE = 32
+        val COLUMN_EMAIL_SIZE = 255
+        val SIZE = 4 * 3 + COLUMN_USERNAME_SIZE + COLUMN_EMAIL_SIZE
+
+        fun deserialize(buf: ByteBuffer): Row {
+            val id = buf.getInt()
+
+            val ucount = buf.getInt()
+            val ubytes = ByteArray(ucount)
+            buf.get(ubytes)
+            val username = ubytes.toString(UTF_8)
+
+            val ebytes = ByteArray(buf.getInt())
+            buf.get(ebytes)
+            val email = ebytes.toString(UTF_8)
+
+            return Row(id, username, email)
+        }
     }
 }
 
@@ -54,6 +59,10 @@ class Page() {
     val rows = mutableListOf<Row>()
 
     fun addRow(row: Row) = rows.add(row)
+
+    fun eachRow(callback: (row: Row) -> Unit) {
+        for (row in rows) { callback(row) }
+    }
 
     fun isFull() = rows.size >= Page.MAX_ROWS
 
@@ -63,14 +72,115 @@ class Page() {
     }
 }
 
+class Pager(val channel: SeekableByteChannel, val pages: MutableList<Page>) {
+    fun close() {
+        channel.truncate(0)
+
+        eachPage({ page -> writePage(page) })
+
+        channel.close()
+    }
+
+    fun eachPage(callback: (page: Page) -> Unit) {
+        for (page in pages) { callback(page) }
+    }
+
+    fun getNextAvailablePage(): Page? {
+        if (pages.isEmpty()) {
+            val firstPage = Page()
+            pages.add(firstPage)
+            return firstPage
+        }
+
+        val lastPage = pages.last()
+        if (!lastPage.isFull()) return lastPage
+
+        if (isFull()) return null
+
+        val nextPage = Page()
+        pages.add(nextPage)
+        return nextPage
+    }
+
+    fun isFull() = pages.size >= Pager.MAX_PAGES && pages.last().isFull()
+
+    fun writePage(page: Page) {
+        val buf = ByteBuffer.allocate(Page.SIZE)
+        buf.clear()
+
+        page.eachRow({ row -> row.serialize(buf) })
+
+        buf.flip()
+        while (buf.hasRemaining()) {
+            channel.write(buf)
+        }
+    }
+
+    companion object {
+        val MAX_PAGES = 100
+
+        fun open(path: Path): Pager {
+            val channel = Files.newByteChannel(path, StandardOpenOption.CREATE, StandardOpenOption.READ,
+                StandardOpenOption.WRITE)
+            val pages = mutableListOf<Page>()
+
+            val buf = ByteBuffer.allocate(Page.SIZE)
+            while (channel.read(buf) != -1) {
+                buf.flip()
+
+                val page = Page()
+                pages.add(page)
+
+                while (!page.isFull() && buf.hasRemaining()) {
+                    page.addRow(Row.deserialize(buf))
+                }
+
+                buf.clear()
+            }
+
+            return Pager(channel, pages)
+        }
+    }
+}
+
+class Table(val pager: Pager) {
+    fun addRow(row: Row) {
+        val page = pager.getNextAvailablePage()
+        when (page) {
+            null -> throw TableFull()
+            else -> page.addRow(row)
+        }
+    }
+
+    fun close() = pager.close()
+
+    fun eachRow(callback: (row: Row) -> Unit) {
+        pager.eachPage({ page -> page.eachRow({ row -> callback(row) }) })
+    }
+}
+
+object DB {
+    val FILE_SYSTEM = FileSystems.getDefault()
+    val DEFAULT_PATH = FILE_SYSTEM.getPath(".", "db/ktdb.db")
+
+    fun open(filename: String?): Table {
+        val path = if (filename != null) FILE_SYSTEM.getPath(filename) else DEFAULT_PATH
+        val pager = Pager.open(path)
+
+        return Table(pager)
+    }
+
+    fun close(table: Table) {
+        table.close()
+    }
+}
+
 sealed class Statement
 class InsertStatement(val row: Row) : Statement()
 class SelectStatement : Statement()
 
 val INSERT_REGEX = """^insert ([-\d]+) (\S+) (\S+)""".toRegex(RegexOption.IGNORE_CASE)
 val SELECT_REGEX = """^select.*""".toRegex(RegexOption.IGNORE_CASE)
-val COLUMN_USERNAME_SIZE = 32
-val COLUMN_EMAIL_SIZE = 255
 
 fun printRow(row: Row) {
     println("(${row.id}, ${row.username}, ${row.email})")
@@ -80,9 +190,12 @@ fun printPrompt() {
     print("db > ")
 }
 
-fun doMetaCommand(input: String) {
+fun doMetaCommand(input: String, table: Table) {
     when (input) {
-        ".exit" -> exitProcess(0)
+        ".exit" -> {
+            DB.close(table)
+            exitProcess(0)
+        }
         else -> throw UnrecognizedCommand(input)
     }
 }
@@ -95,8 +208,8 @@ fun prepareInsert(input: String): InsertStatement {
     val id = idStr.toInt()
 
     if (id < 0) throw NegativeID()
-    if (username.length > COLUMN_USERNAME_SIZE) throw StringTooLong()
-    if (email.length > COLUMN_EMAIL_SIZE) throw StringTooLong()
+    if (username.length > Row.COLUMN_USERNAME_SIZE) throw StringTooLong()
+    if (email.length > Row.COLUMN_EMAIL_SIZE) throw StringTooLong()
 
     val row = Row(id, username, email)
     return InsertStatement(row)
@@ -119,8 +232,6 @@ fun prepareStatement(input: String): Statement {
 }
 
 fun executeInsert(table: Table, statement: InsertStatement) {
-    if (table.isFull()) throw TableFull()
-
     table.addRow(statement.row)
 }
 
@@ -136,7 +247,8 @@ fun executeStatement(table: Table, statement: Statement) {
 }
 
 fun main(args: Array<String>) {
-    val table = Table()
+    val filename = if (args.size > 0) args[0] else null
+    val table = DB.open(filename)
 
     do {
         printPrompt()
@@ -144,7 +256,7 @@ fun main(args: Array<String>) {
 
         if (input.startsWith(".")) {
             try {
-                doMetaCommand(input)
+                doMetaCommand(input, table)
             } catch (e: UnrecognizedCommand) {
                 println(e.message)
             } finally {

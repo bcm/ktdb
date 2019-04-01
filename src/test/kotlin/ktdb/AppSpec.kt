@@ -1,12 +1,13 @@
 package ktdb
 
+import java.nio.file.Files
 import kotlin.test.assertEquals
 import org.spekframework.spek2.Spek
 import org.spekframework.spek2.style.specification.describe
 
 object AppSpec : Spek({
     fun runApp(commands: List<String>): List<String> {
-        val process = ProcessBuilder("gradle", "run", "-q", "--console=plain")
+        val process = ProcessBuilder("gradle", "run", "-q", "--console=plain", "--args='db/test.db'")
             .directory(null)
             .redirectOutput(ProcessBuilder.Redirect.PIPE)
             .redirectError(ProcessBuilder.Redirect.PIPE)
@@ -25,6 +26,10 @@ object AppSpec : Spek({
     }
 
     describe("database") {
+        beforeEachTest {
+            Files.deleteIfExists(DB.FILE_SYSTEM.getPath("db/test.db"))
+        }
+
         it("inserts and retrieves a row") {
             val result = runApp(listOf(
                 "insert 1 user1 person1@example.com",
@@ -97,6 +102,27 @@ object AppSpec : Spek({
                 "db > Executed.",
                 "db > "
             ), result)
+        }
+
+        it("keeps data after closing connection") {
+            val result1 = runApp(listOf(
+                "insert 1 user1 person1@example.com",
+                ".exit"
+            ))
+            assertEquals(listOf(
+                "db > Executed.",
+                "db > "
+            ), result1)
+
+            val result2 = runApp(listOf(
+                "select",
+                ".exit"
+            ))
+            assertEquals(listOf(
+                "db > (1, user1, person1@example.com)",
+                "Executed.",
+                "db > "
+            ), result2)
         }
     }
 })
